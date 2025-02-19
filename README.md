@@ -1,4 +1,4 @@
-This repository contains my resources for Machine Learning: models, plots, etc.
+This repository contains useful resources for Machine Learning: how to work with models, plots, etc.
 
 
 ### Useful links:
