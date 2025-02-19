@@ -3,3 +3,4 @@ This repository contains useful resources for Machine Learning: how to work with
 
 ### Useful links:
 * https://colab.research.google.com/github/ageron/handson-ml3
+* https://playground.tensorflow.org/
