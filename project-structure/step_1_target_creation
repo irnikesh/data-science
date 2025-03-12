@@ -1,1 +1,180 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Customer Churn Prediction: Target Creation
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Python & Pyspark utils
+
+# COMMAND ----------
+
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_imports
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_data_catalog
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helpers
+
+# COMMAND ----------
+
+from nodes.sql_queries_labels import (
+)
+from nodes.etl import (
+    apply_split_train_test
+)
+from utils.test import (
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 1: Pull Raw Data from Snowflake
+
+# COMMAND ----------
+
+is_force_refresh = True # cache
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Preprocess Raw Data
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC keep trials once they have positive total arr
+
+
+
+# COMMAND ----------
+
+# treat mid-term churners: Proposal: remove customers with multiple churns for now
+
+
+# COMMAND ----------
+
+# create date partitioning from start date to end date
+date_sequence = F.sequence(F.col("start_date"), F.col("end_date"), F.expr(DATE_PARTITION_INTERVAL))
+
+churn_data_w_labels_full = (
+    churn_data_raw
+    .withColumn("date_partition", F.explode(date_sequence))
+    .withColumn(f"{TARGET_NAME}", F.when(F.datediff(F.col("churned_at"), F.col("date_partition")) < DAYS_BEFORE_CHURN, 1).otherwise(0))
+    .drop("rundate_minus_days_before_churn")
+)
+
+# COMMAND ----------
+
+# remove orgs with missing data for now
+missing_date_orgs = (
+    churn_data_w_labels_full.alias("o")
+    .join(daily_arr.alias("m"), 
+          ((F.col("o.id") == F.col("m.id")) & (F.col("o.date_partition") == F.col("m.date_partition"))),"left")
+    .select(F.col("o.id").alias("id"), F.col("o.date_partition").alias("date_partition"), F.col("m.date_partition").alias("dp2"))
+    .filter(F.col("dp2").isNull()).select("id").distinct()
+)
+
+churn_data_w_labels_full = churn_data_w_labels_full.join(missing_date_orgs, "id", "left_anti")
+
+
+# MAGIC %md
+# MAGIC ## Step 3: Split on Train & Test
+
+# COMMAND ----------
+
+# Read back saved data
+churn_data_w_labels_full = spark.read.parquet(churn_data_w_labels_full_path)
+
+# COMMAND ----------
+
+# Split data on train & test datasets using OOS split
+
+split_ratio = [0.8, 0.2]
+train_keys, test_keys = (
+    churn_data_w_labels_full
+    .select("id")
+    .distinct()
+    .randomSplit(weights=split_ratio, seed=23)
+)
+
+# TODO: change to OOS+OOT. For now it is OOS. Problem: with OOT entries are filtered out.
+
+# COMMAND ----------
+
+ids_train_test_split = (
+    train_keys
+    .select('id').distinct()
+    .withColumn('is_train', F.lit(True))
+    .unionByName(
+        test_keys
+        .select('id').distinct()
+        .withColumn('is_train', F.lit(False))
+        )
+)
+
+ids_train_test_split.count()
+
+# COMMAND ----------
+
+# Write Final Dataset
+ids_train_test_split.repartition(64).write.parquet(ids_train_test_split_path, mode='overwrite')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### split on train and validation data sets
+
+# COMMAND ----------
+
+# Read back saved data
+churn_data_w_labels_full = spark.read.parquet(churn_data_w_labels_full_path)
+ids_train_test_split = spark.read.parquet(ids_train_test_split_path)
+
+# COMMAND ----------
+
+train_df, test_df = apply_split_train_test(
+    df_train_test_ids = ids_train_test_split, 
+    df_master_data = churn_data_w_labels_full,
+    keys_list = ['id']
+)
+
+# COMMAND ----------
+
+# Split train data on train & validation datasets using OOS split
+
+split_ratio = [0.8, 0.2]
+train_keys, validation_keys = (
+    train_df
+    .select("id")
+    .distinct()
+    .randomSplit(weights=split_ratio, seed=23)
+)
+
+# COMMAND ----------
+
+ids_train_validation_split = (
+    train_keys
+    .select('id').distinct()
+    .withColumn('is_train', F.lit(True))
+    .unionByName(
+        validation_keys
+        .select('id').distinct()
+        .withColumn('is_train', F.lit(False))
+        )
+)
+
+ids_train_validation_split.count()
+
+# COMMAND ----------
+
+# Write Final Dataset
+ids_train_validation_split.repartition(64).write.parquet(ids_train_validation_split_path, mode='overwrite')
