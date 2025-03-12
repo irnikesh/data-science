@@ -1,1 +1,422 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Customer Churn Prediction: Modeling
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC ## Step 0: Python & Pyspark utils
+
+# COMMAND ----------
+
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_imports
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_data_catalog
+
+# COMMAND ----------
+
+# MAGIC %run ./nodes/metrics
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helpers
+
+# COMMAND ----------
+
+from lightgbm import LGBMClassifier
+from utils.helper_distributions import (
+    show_freqs
+)
+from nodes.etl import (
+    apply_split_train_test,
+    convert_df_toPandas,
+    split_features_target
+)
+from nodes.features_funcions import (
+    create_monthly_feature_name,
+    create_daily_feature_name
+)
+
+from nodes.modeling_functions import (
+    compute_target_encoder,
+    perform_target_encoding
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Define Data Catalog
+# MAGIC
+
+# COMMAND ----------
+
+target = 'is_churned_next_90_days'
+
+features = [
+    'feature_1',
+    'feature_2'
+]
+
+categorical_columns = [
+    'age_over_last_30_months',
+    'seats_over_last_30_months',
+    'age_over_last_60_months',
+    'seats_over_last_60_months',
+    'age_over_last_90_months',
+    'seats_over_last_90_months',
+    'age_over_last_121_months',
+    'seats_over_last_121_months',
+    'age_over_last_151_months',
+    'seats_over_last_151_months',
+    'age_over_last_182_months',
+    'seats_over_last_182_months',
+    'age_over_last_273_months',
+    'seats_over_last_273_months',
+    'age_over_last_364_months',
+    'seats_over_last_364_months',
+    'month',
+    'state',
+ ]
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 1: Read Train & Test Data with Features
+
+# COMMAND ----------
+
+# Read back saved data
+churn_data = spark.read.parquet(churn_data_w_features_labels_transformed_path)
+ids_train_test_split = spark.read.parquet(ids_train_test_split_path)
+
+# COMMAND ----------
+
+train_df, test_df = apply_split_train_test(
+    df_train_test_ids = ids_train_test_split, 
+    df_master_data = churn_data,
+    keys_list = ['organization_id']
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Split train into train and validation
+
+# COMMAND ----------
+
+ids_train_validation_split = spark.read.parquet(ids_train_validation_split_path)
+
+# COMMAND ----------
+
+train_df, validation_df = apply_split_train_test(
+    df_train_test_ids = ids_train_validation_split, 
+    df_master_data = train_df,
+    keys_list = ['organization_id']
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Transform Data for Modeling
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Dealing with categorical variables
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Target Encoding
+
+# COMMAND ----------
+
+target_encoder = compute_target_encoder(train_df, categorical_columns, target)
+
+train_df = perform_target_encoding(train_df, target_encoder, categorical_columns, target)
+
+# COMMAND ----------
+
+test_df = perform_target_encoding(test_df, target_encoder, categorical_columns, target)
+validation_df = perform_target_encoding(validation_df, target_encoder, categorical_columns, target)
+
+# COMMAND ----------
+
+# Write Intermediate Dataset
+train_df.repartition(64).write.parquet(train_path, mode='overwrite')
+validation_df.repartition(64).write.parquet(validation_path, mode='overwrite')
+test_df.repartition(64).write.parquet(test_path, mode='overwrite')
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 4: Train Model
+
+# COMMAND ----------
+
+train_df = spark.read.parquet(train_path)
+validation_df = spark.read.parquet(validation_path)
+test_df = spark.read.parquet(test_path)
+
+# COMMAND ----------
+
+train_df_pd = convert_df_toPandas(train_df)
+validation_df_pd = convert_df_toPandas(validation_df)
+test_df_pd = convert_df_toPandas(test_df)
+
+# COMMAND ----------
+
+final_feature_list = features + categorical_columns
+
+X_train, y_train = split_features_target(train_df_pd, final_feature_list, target)
+X_val, y_val = split_features_target(validation_df_pd, final_feature_list, target)
+X_test, y_test = split_features_target(test_df_pd, final_feature_list, target)
+lgbmc = LGBMClassifier(n_estimators= 500, is_unbalance=True, max_depth = 10, reg_alpha = 10.0, random_state=0, importance_type='gain', subsample = 0.8) 
+lgbmc.fit(X_train, y_train)
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 5: Evaluate Model
+
+# COMMAND ----------
+
+tracking_evaluation_metric(X_train, y_train, lgbmc, "lightgbm")
+
+# COMMAND ----------
+
+tracking_evaluation_metric(X_test, y_test, lgbmc, "lightgbm")
+
+# COMMAND ----------
+
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import classification_report, roc_auc_score, precision_score
+
+# Calibrate probabilities using CalibratedClassifierCV
+calibrated_clf = CalibratedClassifierCV(base_estimator=lgbmc, method='sigmoid', cv='prefit')
+calibrated_clf.fit(X_val, y_val)
+
+# Predict probabilities and class labels
+y_pred = calibrated_clf.predict(X_test)
+y_prob = calibrated_clf.predict_proba(X_test)[:, 1]
+
+# Print classification report
+print(classification_report(y_test, y_pred))
+
+# Calculate and print ROC AUC score
+roc_auc = roc_auc_score(y_test, y_prob)
+print(f"ROC AUC Score: {roc_auc}")
+
+precision = precision_score(y_test, y_pred)
+print(f"Precision Score: {precision}")
+
+# COMMAND ----------
+
+tracking_evaluation_metric(X_val, y_val, calibrated_clf, "lightgbm")
+
+# COMMAND ----------
+
+tracking_evaluation_metric(X_test, y_test, calibrated_clf, "lightgbm")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Feature importance
+
+# COMMAND ----------
+
+import lightgbm as lgb
+lgb.plot_importance(lgbmc, max_num_features=25)  # Adjust max_num_features as needed
+plt.show()
+
+# COMMAND ----------
+
+feature_importance_df = pd.DataFrame({
+    'Feature': lgbmc.feature_name_,
+    'Importance': lgbmc.feature_importances_
+})
+
+feature_importance_df.sort_values(by='Importance', ascending=False).display()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Deepdive
+
+# COMMAND ----------
+
+y_test_preds = calibrated_clf.predict(X_test) #lgbmc.predict(X_test)
+test_df_pd['prediction'] = y_test_preds
+
+test_w_preds_spark = spark.createDataFrame(test_df_pd)
+
+# COMMAND ----------
+
+y_preds = calibrated_clf.predict(X_test)
+test_df_pd['prediction'] = y_preds
+
+test_w_preds_spark = spark.createDataFrame(test_df_pd)
+
+test_w_preds_spark_grouped = (
+    test_w_preds_spark
+    .groupBy('organization_id')
+    .agg(
+        F.max(target).alias("is_churned"),
+        F.max('prediction').alias("is_predicted_to_churn"),
+        F.min(F.when(F.col(target) == 1, F.col("date_partition"))).alias("first_churned_date_partition"),
+        F.min(F.when(F.col("prediction") == 1, F.col("date_partition"))).alias("first_predicted_churned_date_partition"),
+        F.max("end_date").alias("end_date")
+    )
+)
+
+first_level_cohort = (
+    test_w_preds_spark_grouped
+    .withColumn(
+    'prediction_cohort',
+    F.when(((F.col("is_churned") == 1) & (F.col("is_predicted_to_churn") == 1)), '1. predicted to churn correctly')
+    .when(((F.col("is_churned") == 0) & (F.col("is_predicted_to_churn") == 0)), '2. predicted to stay active correctly')
+    .when(((F.col("is_churned") == 1) & (F.col("is_predicted_to_churn") == 0)), '3. predicted to churn incorrectly')
+    .when(((F.col("is_churned") == 0) & (F.col("is_predicted_to_churn") == 1)), '4. predicted to stay active incorrectly')
+    .otherwise(None)
+)
+)
+show_freqs(first_level_cohort, ['prediction_cohort'])
+
+
+# COMMAND ----------
+
+predicted_churners = test_w_preds_spark_grouped.filter((F.col("is_churned") == 1) & (F.col("is_predicted_to_churn") == 1))
+
+# COMMAND ----------
+
+(
+    predicted_churners
+    .withColumn('days_between_prediction_and_actual_churn_prediction', F.datediff(F.col('first_predicted_churned_date_partition'), F.col('first_churned_date_partition')))
+    .display()
+)
+
+# COMMAND ----------
+
+second_level_cohort = (
+    (
+    predicted_churners
+    .withColumn('days_between_prediction_and_actual_churn_prediction', F.datediff(F.col('first_predicted_churned_date_partition'), F.col('first_churned_date_partition')))
+    .withColumn(
+    'prediction_cohort_2',
+    F.when(F.col('days_between_prediction_and_actual_churn_prediction') == 0, '1. predicted on churn date')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') > 0, '2. predicted after churn date')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') >= -DAYS_BEFORE_CHURN, '3. predicted within x days before churn date')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') < -DAYS_BEFORE_CHURN, '4. predicted too early')
+    .otherwise(None)
+)
+)
+)
+show_freqs(second_level_cohort, ['prediction_cohort_2'])
+
+# COMMAND ----------
+
+y_preds = calibrated_clf.predict(X_test)
+test_df_pd['prediction'] = y_preds
+
+test_w_preds_spark = spark.createDataFrame(test_df_pd)
+
+test_w_preds_spark_grouped = (
+    test_w_preds_spark
+    .groupBy('organization_id')
+    .agg(
+        F.max(target).alias("is_churned_next_x_days"),
+        F.max('prediction').alias("is_predicted_to_churn_next_x_days"),
+
+        F.min(F.when(F.col(target) == 1, F.col("date_partition"))).alias("first_churned_date_partition"),
+        # F.min(F.when(F.col(target) == 1, F.col("days_since_account_creation"))).alias("actual_days_since_account_creation"),
+        F.min(F.when(F.col(target) == 1, F.col("days_since_last_subscription_purchased"))).alias("actual_days_since_last_subscription_purchased"),
+
+        F.min(F.when(F.col("prediction") == 1, F.col("date_partition"))).alias("first_predicted_churned_date_partition"),
+        # F.min(F.when(F.col("prediction") == 1, F.col("days_since_account_creation"))).alias("predicted_days_since_account_creation"),
+        F.min(F.when(F.col("prediction") == 1, F.col("days_since_last_subscription_purchased"))).alias("predicted_days_since_last_subscription_purchased"),
+    )
+    .withColumn('days_between_prediction_and_actual_churn_prediction', F.datediff(F.col('first_predicted_churned_date_partition'), F.col('first_churned_date_partition')))
+    .withColumn(
+        'is_predicted_within_x_days_before_churn',
+        F.when((F.col('days_between_prediction_and_actual_churn_prediction') >= -DAYS_BEFORE_CHURN) & (F.col('days_between_prediction_and_actual_churn_prediction') <= -1), 1).otherwise(0)
+               )
+    
+
+    .withColumn(
+    'is_predicted_to_churn_categorized',
+    F.when((F.col('days_between_prediction_and_actual_churn_prediction').between(-DAYS_BEFORE_CHURN, -1)), F.lit(1))
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') == 0, F.lit(3))
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') > 0, F.lit(3))
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') < -DAYS_BEFORE_CHURN, F.lit(2))
+
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNotNull()) & (F.col('first_churned_date_partition').isNull()), F.lit(1))
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNull()) & (F.col('first_churned_date_partition').isNotNull()), F.lit(0))
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNull()) & (F.col('first_churned_date_partition').isNull()), F.lit(0))
+    .otherwise(None)
+    )
+
+    .withColumn(
+    'prediction_cohort',
+    F.when((F.col('days_between_prediction_and_actual_churn_prediction').between(-DAYS_BEFORE_CHURN, -1)), '1. predicted_within_x_days_before_churn_date')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') == 0, '2. predicted_on_churn_date')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') > 0, '3. predicted_less_than_x_days_before_actual_churn')
+    .when(F.col('days_between_prediction_and_actual_churn_prediction') < -DAYS_BEFORE_CHURN, '4. predicted_too_early')
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNotNull()) & (F.col('first_churned_date_partition').isNull()), '5. predicted_false_positive')
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNull()) & (F.col('first_churned_date_partition').isNotNull()), '6. predicted_false_negative')
+    .when((F.col('days_between_prediction_and_actual_churn_prediction').isNull()) & (F.col('first_predicted_churned_date_partition').isNull()) & (F.col('first_churned_date_partition').isNull()), '7. predicted_true_negative')
+    .otherwise(None)
+)
+
+)
+
+
+# COMMAND ----------
+
+show_freqs(test_w_preds_spark_grouped, ['prediction_cohort'])
+
+
+# COMMAND ----------
+
+# alternative way to show the same information in the confusion matrix
+
+def plot_confusion_matrix_extended(y_true, y_pred):
+        
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1, 2, 3])
+
+    disp.plot(cmap='Blues', values_format='d')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+plot_confusion_matrix_extended(test_w_preds_spark_grouped.select('is_churned_next_91_days').toPandas(), test_w_preds_spark_grouped.select('is_predicted_to_churn_categorized').toPandas())
+print(f"% of correctly predicted churn among all churned customers: {100*test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='1. predicted_within_91_days_before_churn_date').count() / test_w_preds_spark_grouped.where(F.col('first_churned_date_partition').isNotNull()).count()}%")
+
+# 2 means that predicted churn but too early 
+# 3 means predicted but too late (either on churn date or later -> can't prevent churn) -> there shouldn't be such cases in the data at all 
+
+# COMMAND ----------
+
+# how many times we predicted churn within 91 days before the real churn date
+print(f"# of customers in the cohort: {test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='1. predicted_within_91_days_before_churn_date').count()}")
+print(f"% of all churned customers: {100* test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='1. predicted_within_91_days_before_churn_date').count() / test_w_preds_spark_grouped.where(F.col('first_churned_date_partition').isNotNull()).count()}%")
+
+# COMMAND ----------
+
+# not actionable predictions: we predicted real churn but only on the exact date of churn or later
+print(f"# of customers in the cohort: {(test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='2. predicted_on_churn_date').count() + test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='3. predicted_too_late').count())}")
+print(f"% of all churned customers: {100*(test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='2. predicted_on_churn_date').count() + test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='3. predicted_too_late').count())/ test_w_preds_spark_grouped.where(F.col('first_churned_date_partition').isNotNull()).count()}%")
+
+# COMMAND ----------
+
+ # how many wrong interventions we produce with our predictions
+print(f"# of customers in the cohort: {(test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='5. predicted_false_positive').count())}")
+print(f"% of all not churned customers: {100*test_w_preds_spark_grouped.where(F.col('prediction_cohort')=='5. predicted_false_positive').count() / test_w_preds_spark_grouped.where(F.col('first_churned_date_partition').isNull()).count()}%")
