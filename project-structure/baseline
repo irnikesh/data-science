@@ -1,1 +1,192 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Customer Churn Prediction: Baseline - customer's exporting activities indicate churn
+# MAGIC <pre>
+# MAGIC Your baseline and models go here
+# MAGIC </pre>
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Python & Pyspark utils
+
+# COMMAND ----------
+
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_imports
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_data_catalog
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helpers
+
+# COMMAND ----------
+
+# MAGIC %run ./nodes/metrics
+
+# COMMAND ----------
+
+from nodes.etl import (
+    apply_split_train_test
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Define Data Catalog: Parameters
+# MAGIC
+# MAGIC Add any hardcoded params to this section
+
+# COMMAND ----------
+
+BASELINE_RUNDATE = RUNDATE # '2024-03-31'
+BASELINE_START_DATE = '2023-12-31' # RUNDATE minus 3 months
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Define Data Catalog: Datasets
+# MAGIC
+# MAGIC Add all the paths for the datasets you save in the notebook
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 1: Read Train & Test Data with Features
+
+# COMMAND ----------
+
+# Read back saved data
+churn_data_w_labels_full = spark.read.parquet(churn_data_w_labels_full_path)
+exported_ratio_feature = spark.read.parquet(exported_ratio_sequenced_path)
+ids_train_test_split = spark.read.parquet(ids_train_test_split_path)
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Transform Data for Modeling
+
+# COMMAND ----------
+
+# create train and test as pandas
+
+print(f'Number of rows before: {churn_data_w_labels_full.count()}')
+
+exported_ratio_w_labels = (
+    churn_data_w_labels_full
+    .join(exported_ratio_feature, ['id', 'date_partition'], 'left')
+)
+
+print(f'Number of rows of exported_ratio_feature with labels: {exported_ratio_w_labels.count()}')
+print(f'exported_boards_ratio nulls count: {exported_boards_ratio_w_labels.filter(F.col("exported_ratio").isNull()).count()}')
+
+train_data, test_data = apply_split_train_test(
+    df_train_test_ids = ids_train_test_split, 
+    df_master_data = exported_ratio_w_labels,
+    keys_list = ['id']
+)
+
+train_f4 = train_data.select("id", "exported_ratio", "is_churned_next_45_days").toPandas()
+test_f4 = test_data.select("id", "exported_ratio", "is_churned_next_45_days").toPandas()
+
+# COMMAND ----------
+
+# Write Intermediate Dataset
+
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 4: Train Model
+
+# COMMAND ----------
+
+from sklearn.metrics import precision_recall_curve
+import matplotlib.pyplot as plt
+
+y_scores = train_f4['exported_ratio']
+y_true = train_f4['is_churned_next_45_days']
+
+precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+
+precision = np.append(precision, 1)
+recall = np.append(recall, 0)
+thresholds = np.append(thresholds, 1)
+
+plt.figure(figsize=(8, 6))
+plt.plot(thresholds, precision[:-1], 'b--', label='Precision')
+plt.plot(thresholds, recall[:-1], 'g-', label='Recall')
+plt.xlabel('Threshold')
+plt.ylabel('Precision/Recall')
+plt.title('Precision-Recall Curve')
+plt.legend(loc='best')
+plt.show()
+
+# Conclusion: best treshold is 0.56
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 5: Evaluate Model
+
+# COMMAND ----------
+
+THRESHOLD = 0.56
+
+train_f4['churned_prediction'] = np.where(train_f4['exported_ratio'] > THRESHOLD, 1, 0)
+train_predictions = train_f4['churned_prediction']
+train_actuals = train_f4['is_churned_next_45_days']
+
+precision = precision_score(train_actuals, train_predictions)
+recall = recall_score(train_actuals, train_predictions)
+f1 = f1_score(train_actuals, train_predictions)
+roc_auc = roc_auc_score(train_actuals, train_predictions)
+
+
+print("Precision:", precision)
+print("Recall:", recall)
+print("F1 Score:", f1)
+print("ROC AUC:", roc_auc)
+
+plot_confusion_matrix(train_actuals, train_predictions)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Alternative way to evaluate
+
+# COMMAND ----------
+
+def tracking_evaluation_metric_baseline(test_df, threshold):
+
+    test_df['is_churned_next_45_days_prediction'] = np.where(test_df['exported_boards_ratio'] > threshold, 1, 0)
+    y_pred_proba = test_df['exported_boards_ratio'] #NB! it's not a real probability, it's just a ratio that we use for a baseline rule
+    y_pred = test_df['is_churned_next_45_days_prediction']
+    y_test = test_df['is_churned_next_45_days']
+
+    recall,roc_auc,precision =[],[],[]
+
+    recall.append(round(recall_score(y_test, y_pred),4))
+    roc_auc.append(round(roc_auc_score(y_test, y_pred_proba),4))
+    precision.append(round(precision_score(y_test, y_pred),4))
+
+    result_df = pd.DataFrame({'Recall':recall, 'Roc_Auc':roc_auc, 'Precision':precision}, index=['baseline'])
+    plot_confusion_matrix(y_test, y_pred)
+    
+    return result_df
+    
+
+
+tracking_evaluation_metric_baseline(test_f4, 0.56)
+
+# COMMAND ----------
+
+tracking_evaluation_metric_baseline(train_f4, 0.56)
