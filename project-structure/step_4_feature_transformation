@@ -1,1 +1,112 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Customer Churn Prediction: Further Feature Engineering & Transformations
+# MAGIC <pre>
+# MAGIC Nulls imputations, derived features, etc. should be part of this notebook
+# MAGIC </pre>
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Python & Pyspark utils
+
+# COMMAND ----------
+
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_imports
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helper_data_catalog
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/helpers
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 0: Define Data Catalog: Parameters
+# MAGIC
+# MAGIC Add any hardcoded params to this section
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 1: Features Nulls Imputation
+# MAGIC
+# MAGIC Check nulls here and impute them 
+
+# COMMAND ----------
+
+# Read back saved data
+churn_w_features_labels = spark.read.parquet(churn_data_w_features_labels_path)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Fill the following features nulls with zeros:
+
+# COMMAND ----------
+
+churn_data_transformed = (
+  churn_w_features_labels
+    .fillna({"feature_1": 0})
+)
+d(churn_data_transformed)
+
+# COMMAND ----------
+
+n(churn_data_transformed)
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC ## Step 2: Features Derivation 
+# MAGIC
+# MAGIC Derive additional features from existing one (e.g. 1-month lag of feature X; some features that could help to detect spikes)
+
+
+# COMMAND ----------
+
+# feel free to drop but you might find this function helpful if you need some inspiration for spike detection 
+
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+
+def detect_spikes(df, board_id_col, date_col, feature_count_col, window_size):
+    """
+    Detect spikes in the feature count column based on differences
+    compared to a certain window in the past.
+
+    Args:
+    - df: DataFrame containing the data
+    - board_id_col: Name of the column containing board IDs
+    - date_col: Name of the column containing dates
+    - feature_count_col: Name of the column containing feature counts
+    - window_size: Size of the window to compare differences
+
+    Returns:
+    - DataFrame with a new column 'Spike' indicating spikes
+    """
+
+    window_spec = Window.partitionBy(board_id_col).orderBy(date_col)
+
+    df = df.withColumn('diff', F.col(feature_count_col) - F.lag(F.col(feature_count_col)).over(window_spec)).fillna({'diff':0})
+    
+    window_spec = Window.partitionBy(board_id_col).rowsBetween(-window_size, Window.currentRow)
+
+    df = (
+       df
+       .withColumn(f'{feature_count_col}_avg_{window_size}', F.mean('diff').over(window_spec))
+       .withColumn(f'{feature_count_col}_stddev_{window_size}', F.stddev('diff').over(window_spec))
+       .withColumn(f'{feature_count_col}_coef_var_{window_size}', F.col(f'{feature_count_col}_stddev_{window_size}') / F.col(f'{feature_count_col}_avg_{window_size}'))
+       .drop('diff')
+    )
+    
+    return df
