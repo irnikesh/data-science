@@ -1,0 +1,29 @@
+import tiktoken
+encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+encoding.encode("tiktoken is great!")
+>> [83, 1609, 5963, 374, 2294, 0]
+
+text = """
+Vaccination stimulates the formation of an immune response to a particular pathogen. 
+This gives the body a head start in the fight against disease in the event of a later exposure. 
+Vaccines based on killed or weakened viruses have long been available, 
+exemplified by the vaccines against polio, measles, and yellow fever. 
+In 1951, Max Theiler was awarded the Nobel Prize in Physiology or Medicine for developing the yellow fever vaccine.
+"""
+# original length
+len(encoding.encode(text))
+>> 95
+# replacing newlines with spaces works
+len(encoding.encode(text.replace('\n', ' ')))
+>> 92
+# also if there's no space after the newline
+# it can hurt the tokenization 
+len(encoding.encode('\n Vaccination')) -> 3
+len(encoding.encode('\nVaccination')) -> 4
+# lowercasing can also work but it's hard to predict
+# 'Nobel' and 'nobel' are different strings and tokenization can differ
+# but you never know which one is more common
+# here Nobel is one token and nobel is two
+# so the length increases with lowercasing 
+len(encoding.encode(text.lower()))
+>> 96
