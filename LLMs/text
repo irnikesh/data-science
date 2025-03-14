@@ -27,3 +27,23 @@ len(encoding.encode('\nVaccination')) -> 4
 # so the length increases with lowercasing 
 len(encoding.encode(text.lower()))
 >> 96
+
+import tiktoken
+encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+
+# cyrillic is one token because the tokenizer merged its 2 bytes during training
+len(encoding.encode('Т'))
+>>1
+
+# bath emoji is 3 tokens because the tokenizer only merged one pair of bytes
+len(encoding.encode('🛀'))
+>>3
+
+# you can return bytes represention using tiktoken to see what model sees
+# one merged token for Т
+[encoding.decode_single_token_bytes(w) for w in encoding.encode('Т')]
+>>[b'\xd0\xa2']
+
+# partially merged bytes for 🛀
+[encoding.decode_single_token_bytes(w) for w in encoding.encode('🛀')]
+>>[b'\xf0\x9f', b'\x9b', b'\x80'] 
