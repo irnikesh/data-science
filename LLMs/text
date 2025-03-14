@@ -47,3 +47,5 @@ len(encoding.encode('🛀'))
 # partially merged bytes for 🛀
 [encoding.decode_single_token_bytes(w) for w in encoding.encode('🛀')]
 >>[b'\xf0\x9f', b'\x9b', b'\x80'] 
+
+# chatGPT uses Byte pair encoding
