@@ -28,5 +28,21 @@ def plot_hist(df, col_name):
 
 # COMMAND ----------
 
+def plot_scatter(df, x_name, y_name):
+    df_pandas = result.select(x_name, y_name).toPandas()
+    # Convert y_name to numeric (if stored as string)
+    df_pandas[y_name] = pd.to_numeric(df_pandas[y_name], errors="coerce")
+    # Handle null values (optional)
+    df_pandas.dropna(subset=[x_name, y_name], inplace=True)
+    plt.figure(figsize=(8,5))
+    sns.scatterplot(data=df_pandas, x=x_name, y=y_name, hue=x_name, palette="Set2", alpha=0.7)
+
+    plt.xlabel(x_name)
+    plt.ylabel(y_name)
+    plt.title(f"Scatter Plot of Source vs. {y_name}")
+    plt.show()
+
+# COMMAND ----------
+
 def n(df):
     return df.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in df.columns]).display()
